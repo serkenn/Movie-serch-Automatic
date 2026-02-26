@@ -1,4 +1,4 @@
-"""セットアップウィザード - 動画から自動で話者を分離し、ユーザーがラベル付けするだけで基準データを作成"""
+"""セットアップウィザード - 動画から自動で話者を分離し、AIが自動ラベリング → ユーザーは確認するだけ"""
 
 import shutil
 from pathlib import Path
@@ -19,6 +19,7 @@ class SetupWizard:
             self.config = yaml.safe_load(f)
 
         self.config_path = config_path
+        self.encoder = VoiceEncoder()
 
     def run(self, video_path: str, hf_token: str | None = None) -> None:
         """セットアップウィザードを実行する。
@@ -36,7 +37,7 @@ class SetupWizard:
         print(f"\n対象動画: {video_path.name}")
 
         # Step 1: 音声抽出
-        print("\n[Step 1/5] 音声を抽出中...")
+        print("\n[Step 1/6] 音声を抽出中...")
         audio_path = extract_audio(
             str(video_path),
             sample_rate=self.config["audio"]["sample_rate"],
@@ -45,7 +46,7 @@ class SetupWizard:
         print(f"  動画の長さ: {int(duration//60)}分{int(duration%60)}秒")
 
         # Step 2: 話者ダイアライゼーション
-        print("\n[Step 2/5] 話者を自動分離中...")
+        print("\n[Step 2/6] 話者を自動分離中...")
         diarizer = Diarizer(
             max_speakers=self.config["diarization"]["max_speakers"],
             min_segment_duration=self.config["diarization"]["min_segment_duration"],
@@ -62,34 +63,45 @@ class SetupWizard:
         clusters = self._group_segments(segments)
         print(f"  {len(clusters)} 人の話者を検出しました。")
 
-        # Step 3: 各クラスタの代表音声を保存
-        print("\n[Step 3/5] 各話者の音声サンプルを作成中...")
+        # Step 3: 各クラスタの代表音声を保存 & 声紋ベクトル生成
+        print("\n[Step 3/6] 各話者の音声サンプルを作成中...")
         sample_dir = Path("data/setup_samples")
         sample_dir.mkdir(parents=True, exist_ok=True)
         cluster_samples = self._save_cluster_samples(
             str(video_path), clusters, str(sample_dir)
         )
 
-        # Step 4: ユーザーにラベル付けしてもらう
-        print(f"\n[Step 4/5] 話者のラベル付け")
+        # Step 4: 声の特徴を分析
+        print("\n[Step 4/6] 各話者の声の特徴を分析中...")
+        cluster_profiles = self._analyze_voice_profiles(cluster_samples)
+
+        # Step 5: AI自動ラベリング or 手動ラベリング
         performer_ids = [p["id"] for p in self.config["performers"]]
         performer_names = {p["id"]: p["name"] for p in self.config["performers"]}
 
-        print(f"\n  登録する出演者:")
-        for pid in performer_ids:
-            print(f"    - {pid} ({performer_names[pid]})")
+        # 既存の基準音声があるか確認
+        existing_refs = self._load_existing_references()
 
-        assignments = self._interactive_labeling(
-            cluster_samples, performer_ids, performer_names
-        )
+        if existing_refs:
+            print(f"\n[Step 5/6] AIが既存の基準音声と照合して自動判定中...")
+            assignments = self._auto_label_with_references(
+                cluster_samples, cluster_profiles, existing_refs,
+                performer_ids, performer_names
+            )
+        else:
+            print(f"\n[Step 5/6] AIが声の特徴から自動判定中...")
+            assignments = self._auto_label_by_features(
+                cluster_samples, cluster_profiles,
+                performer_ids, performer_names
+            )
 
         if not assignments:
             print("\n  ラベル付けがキャンセルされました。")
             self._cleanup(sample_dir, audio_path)
             return
 
-        # Step 5: 基準音声として保存
-        print(f"\n[Step 5/5] 基準音声を保存中...")
+        # Step 6: 基準音声として保存
+        print(f"\n[Step 6/6] 基準音声を保存中...")
         self._save_references(str(video_path), clusters, assignments)
 
         # クリーンアップ
@@ -105,6 +117,375 @@ class SetupWizard:
         print(f"\n  次のコマンドで解析を実行できます:")
         print(f"    python src/main.py analyze --video <動画ファイル>")
         print()
+
+    # =========================================================================
+    # 声の特徴分析
+    # =========================================================================
+
+    def _analyze_voice_profiles(self, cluster_samples: dict[str, dict]) -> dict[str, dict]:
+        """各クラスタの声の特徴プロファイルを生成する。
+
+        Returns:
+            {クラスタラベル: {
+                "embedding": np.ndarray,   # 声紋ベクトル（平均）
+                "pitch_est": str,          # 声の高さ推定（"高め", "中間", "低め"）
+                "total_time": float,       # 合計発話時間
+                "segment_count": int,      # 発話区間数
+            }}
+        """
+        import librosa
+
+        profiles = {}
+
+        for label, info in sorted(cluster_samples.items()):
+            embeddings = []
+            pitches = []
+
+            for sp in info["sample_paths"]:
+                # 声紋ベクトル
+                wav = preprocess_wav(Path(sp))
+                if len(wav) > 0:
+                    emb = self.encoder.embed_utterance(wav)
+                    embeddings.append(emb)
+
+                # ピッチ推定
+                try:
+                    y, sr = librosa.load(sp, sr=16000)
+                    f0, _, _ = librosa.pyin(y, fmin=50, fmax=500, sr=sr)
+                    valid_f0 = f0[~np.isnan(f0)]
+                    if len(valid_f0) > 0:
+                        pitches.append(float(np.median(valid_f0)))
+                except Exception:
+                    pass
+
+            avg_embedding = np.mean(embeddings, axis=0) if embeddings else np.zeros(256)
+            avg_pitch = float(np.mean(pitches)) if pitches else 0.0
+
+            # ピッチを分類
+            if avg_pitch > 200:
+                pitch_label = "高め"
+            elif avg_pitch > 140:
+                pitch_label = "中間"
+            elif avg_pitch > 0:
+                pitch_label = "低め"
+            else:
+                pitch_label = "不明"
+
+            profiles[label] = {
+                "embedding": avg_embedding,
+                "pitch_hz": avg_pitch,
+                "pitch_est": pitch_label,
+                "total_time": info["total_time"],
+                "segment_count": info["segment_count"],
+            }
+
+            print(f"  {label}: 声の高さ={pitch_label} ({avg_pitch:.0f}Hz), "
+                  f"発話量={info['total_time']:.1f}秒 ({info['segment_count']}区間)")
+
+        return profiles
+
+    def _load_existing_references(self) -> dict[str, np.ndarray]:
+        """既存の基準音声があれば声紋ベクトルを読み込む。
+
+        Returns:
+            {person_id: 声紋ベクトル} の辞書。なければ空辞書。
+        """
+        ref_dir = Path(self.config["paths"]["reference_voices"])
+        refs = {}
+
+        if not ref_dir.exists():
+            return refs
+
+        for person_dir in sorted(ref_dir.iterdir()):
+            if not person_dir.is_dir():
+                continue
+
+            audio_files = list(person_dir.glob("*.wav")) + list(person_dir.glob("*.mp3"))
+            if not audio_files:
+                continue
+
+            embeddings = []
+            for af in audio_files:
+                wav = preprocess_wav(af)
+                if len(wav) > 0:
+                    emb = self.encoder.embed_utterance(wav)
+                    embeddings.append(emb)
+
+            if embeddings:
+                refs[person_dir.name] = np.mean(embeddings, axis=0)
+
+        return refs
+
+    # =========================================================================
+    # AI自動ラベリング（既存基準あり）
+    # =========================================================================
+
+    def _auto_label_with_references(self, cluster_samples: dict[str, dict],
+                                    cluster_profiles: dict[str, dict],
+                                    existing_refs: dict[str, np.ndarray],
+                                    performer_ids: list[str],
+                                    performer_names: dict[str, str]) -> dict[str, str]:
+        """既存の基準音声と照合してAIが自動でラベルを割り当てる。
+
+        ユーザーには結果を確認してもらうだけ。
+        """
+        # 各クラスタと各基準音声の類似度を計算
+        similarity_matrix = {}
+        for label, profile in cluster_profiles.items():
+            similarity_matrix[label] = {}
+            for pid, ref_emb in existing_refs.items():
+                emb = profile["embedding"]
+                sim = float(np.dot(emb, ref_emb) / (
+                    np.linalg.norm(emb) * np.linalg.norm(ref_emb) + 1e-10
+                ))
+                similarity_matrix[label][pid] = sim
+
+        # 最適な割り当てを計算（ハンガリアン法的に貪欲マッチング）
+        assignments = self._greedy_match(similarity_matrix)
+
+        # 結果を表示してユーザーに確認
+        return self._confirm_assignments(
+            assignments, similarity_matrix, cluster_profiles,
+            performer_names, mode="reference"
+        )
+
+    # =========================================================================
+    # AI自動ラベリング（初回・基準なし）
+    # =========================================================================
+
+    def _auto_label_by_features(self, cluster_samples: dict[str, dict],
+                                cluster_profiles: dict[str, dict],
+                                performer_ids: list[str],
+                                performer_names: dict[str, str]) -> dict[str, str]:
+        """基準音声がない場合、声の特徴（ピッチ・発話量）でAIが自動で
+        クラスタを区別し、仮ラベルを割り当てる。ユーザーに確認してもらう。
+        """
+        # 声の特徴でソート（ピッチが高い順）してマッピング
+        sorted_clusters = sorted(
+            cluster_profiles.items(),
+            key=lambda x: (-x[1]["pitch_hz"], -x[1]["total_time"])
+        )
+
+        # クラスタ数と出演者数の少ない方に合わせる
+        n = min(len(sorted_clusters), len(performer_ids))
+        assignments = {}
+        for i in range(n):
+            label = sorted_clusters[i][0]
+            pid = performer_ids[i]
+            assignments[label] = pid
+
+        # 類似度マトリクスはないので特徴情報のみで確認
+        return self._confirm_assignments_initial(
+            assignments, cluster_profiles, performer_names
+        )
+
+    # =========================================================================
+    # ユーザー確認
+    # =========================================================================
+
+    def _confirm_assignments(self, assignments: dict[str, str],
+                             similarity_matrix: dict[str, dict[str, float]],
+                             cluster_profiles: dict[str, dict],
+                             performer_names: dict[str, str],
+                             mode: str = "reference") -> dict[str, str]:
+        """AIの自動ラベリング結果をユーザーに確認してもらう。"""
+
+        print(f"\n  {'─'*50}")
+        print(f"  AIの自動判定結果:")
+        print(f"  {'─'*50}")
+
+        for label, pid in sorted(assignments.items()):
+            name = performer_names.get(pid, pid)
+            profile = cluster_profiles.get(label, {})
+            pitch = profile.get("pitch_est", "?")
+            total_time = profile.get("total_time", 0)
+
+            sim = similarity_matrix.get(label, {}).get(pid, 0.0)
+            confidence = "高" if sim >= 0.85 else "中" if sim >= 0.70 else "低"
+
+            print(f"    {label} → {pid} ({name})")
+            print(f"      類似度: {sim:.4f} [{confidence}]  "
+                  f"声の高さ: {pitch}  発話量: {total_time:.1f}秒")
+
+        # 割り当てられなかったクラスタがあれば表示
+        unassigned = set(cluster_profiles.keys()) - set(assignments.keys())
+        if unassigned:
+            print(f"\n    未割当クラスタ: {', '.join(sorted(unassigned))} (この動画に出ていない人)")
+
+        return self._ask_confirmation(assignments, cluster_profiles, performer_names)
+
+    def _confirm_assignments_initial(self, assignments: dict[str, str],
+                                     cluster_profiles: dict[str, dict],
+                                     performer_names: dict[str, str]) -> dict[str, str]:
+        """初回セットアップ時のAI判定結果をユーザーに確認してもらう。"""
+
+        print(f"\n  {'─'*50}")
+        print(f"  AIの自動判定結果（声の特徴に基づく仮割当）:")
+        print(f"  {'─'*50}")
+        print(f"  ※ 初回のため声の高さ・発話量で仮の順番で割り当てています")
+
+        for label, pid in sorted(assignments.items()):
+            name = performer_names.get(pid, pid)
+            profile = cluster_profiles.get(label, {})
+            pitch = profile.get("pitch_est", "?")
+            pitch_hz = profile.get("pitch_hz", 0)
+            total_time = profile.get("total_time", 0)
+
+            print(f"    {label} → {pid} ({name})")
+            print(f"      声の高さ: {pitch} ({pitch_hz:.0f}Hz)  "
+                  f"発話量: {total_time:.1f}秒")
+
+        unassigned = set(cluster_profiles.keys()) - set(assignments.keys())
+        if unassigned:
+            print(f"\n    未割当クラスタ: {', '.join(sorted(unassigned))} (この動画に出ていない人)")
+
+        return self._ask_confirmation(assignments, cluster_profiles, performer_names)
+
+    def _ask_confirmation(self, assignments: dict[str, str],
+                          cluster_profiles: dict[str, dict],
+                          performer_names: dict[str, str]) -> dict[str, str]:
+        """確認・修正の対話ループ。
+
+        Returns:
+            最終的な割り当て辞書。キャンセル時は空辞書。
+        """
+        while True:
+            print(f"\n  操作を選択してください:")
+            print(f"    y  → この割り当てで決定")
+            print(f"    e  → 手動で修正する")
+            print(f"    q  → キャンセル")
+
+            try:
+                choice = input(f"\n  [y/e/q]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return {}
+
+            if choice == "y":
+                print(f"  → 割り当てを確定しました。")
+                return assignments
+
+            elif choice == "q":
+                return {}
+
+            elif choice == "e":
+                assignments = self._manual_edit(
+                    assignments, cluster_profiles, performer_names
+                )
+                if not assignments:
+                    return {}
+
+                # 修正後の結果を再表示
+                print(f"\n  修正後の割り当て:")
+                for label, pid in sorted(assignments.items()):
+                    name = performer_names.get(pid, pid)
+                    print(f"    {label} → {pid} ({name})")
+                # ループに戻って再度確認
+            else:
+                print(f"  y, e, q のいずれかを入力してください。")
+
+    def _manual_edit(self, assignments: dict[str, str],
+                     cluster_profiles: dict[str, dict],
+                     performer_names: dict[str, str]) -> dict[str, str]:
+        """手動修正モード: 特定のクラスタの割り当てを変更する。"""
+
+        performer_ids = list(performer_names.keys())
+        all_labels = sorted(cluster_profiles.keys())
+
+        print(f"\n  修正するクラスタを選択してください:")
+        for i, label in enumerate(all_labels):
+            current = assignments.get(label, "(未割当)")
+            if current != "(未割当)":
+                current = f"{current} ({performer_names.get(current, current)})"
+            print(f"    {i+1}. {label} → 現在: {current}")
+        print(f"    d  → 完了")
+
+        new_assignments = dict(assignments)
+
+        while True:
+            try:
+                choice = input(f"\n  修正するクラスタ番号 [1-{len(all_labels)}/d]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return {}
+
+            if choice == "d":
+                return new_assignments
+
+            try:
+                idx = int(choice) - 1
+                if not (0 <= idx < len(all_labels)):
+                    print(f"  1〜{len(all_labels)} の数字を入力してください。")
+                    continue
+            except ValueError:
+                print(f"  数字または 'd' を入力してください。")
+                continue
+
+            target_label = all_labels[idx]
+
+            # 割り当て先を選択
+            print(f"\n  {target_label} をどの出演者に割り当てますか？")
+            for i, pid in enumerate(performer_ids):
+                name = performer_names.get(pid, pid)
+                print(f"    {i+1}. {pid} ({name})")
+            print(f"    s. 未割当にする")
+
+            while True:
+                try:
+                    pid_choice = input(f"  選択 [1-{len(performer_ids)}/s]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return {}
+
+                if pid_choice == "s":
+                    new_assignments.pop(target_label, None)
+                    print(f"  → {target_label} を未割当にしました。")
+                    break
+
+                try:
+                    pid_idx = int(pid_choice) - 1
+                    if 0 <= pid_idx < len(performer_ids):
+                        new_pid = performer_ids[pid_idx]
+                        # 既に他のクラスタに割り当てられていたら外す
+                        for lbl, pid in list(new_assignments.items()):
+                            if pid == new_pid and lbl != target_label:
+                                del new_assignments[lbl]
+                                print(f"  ({lbl} の割り当てを解除しました)")
+                        new_assignments[target_label] = new_pid
+                        name = performer_names.get(new_pid, new_pid)
+                        print(f"  → {target_label} = {new_pid} ({name})")
+                        break
+                    else:
+                        print(f"  1〜{len(performer_ids)} の数字を入力してください。")
+                except ValueError:
+                    print(f"  数字または 's' を入力してください。")
+
+        return new_assignments
+
+    # =========================================================================
+    # ユーティリティ
+    # =========================================================================
+
+    def _greedy_match(self, similarity_matrix: dict[str, dict[str, float]]) -> dict[str, str]:
+        """類似度マトリクスから貪欲法で最適な割り当てを計算する。"""
+        assignments = {}
+        used_pids = set()
+
+        # 全ペアをスコア順でソート
+        pairs = []
+        for label, scores in similarity_matrix.items():
+            for pid, sim in scores.items():
+                pairs.append((sim, label, pid))
+
+        pairs.sort(reverse=True)
+
+        for sim, label, pid in pairs:
+            if label in assignments or pid in used_pids:
+                continue
+            assignments[label] = pid
+            used_pids.add(pid)
+
+        return assignments
 
     def _group_segments(self, segments: list[SpeakerSegment]) -> dict[str, list[SpeakerSegment]]:
         """セグメントを話者ラベルごとにグループ化"""
@@ -126,7 +507,6 @@ class SetupWizard:
         result = {}
 
         for label, segs in sorted(clusters.items()):
-            # 長いセグメントを優先して最大3つ選ぶ
             sorted_segs = sorted(segs, key=lambda s: s.duration, reverse=True)
             selected = sorted_segs[:3]
 
@@ -154,71 +534,6 @@ class SetupWizard:
 
         return result
 
-    def _interactive_labeling(self, cluster_samples: dict[str, dict],
-                              performer_ids: list[str],
-                              performer_names: dict[str, str]) -> dict[str, str]:
-        """ユーザーに各クラスタのラベルを聞く。
-
-        Returns:
-            {クラスタラベル: 出演者ID} の辞書
-        """
-        assignments = {}
-        used_ids = set()
-
-        print(f"\n  各話者クラスタに出演者を割り当ててください。")
-        print(f"  音声サンプルは data/setup_samples/ に保存されています。")
-        print(f"  再生して確認してから割り当てを行ってください。")
-        print(f"  (スキップする場合は 's'、中断する場合は 'q' を入力)")
-
-        for label, info in sorted(cluster_samples.items()):
-            print(f"\n  --- 話者クラスタ: {label} ---")
-            print(f"  発話区間: {info['segment_count']}区間, 合計 {info['total_time']:.1f}秒")
-            print(f"  サンプル音声:")
-            for sp in info["sample_paths"]:
-                print(f"    {sp}")
-
-            # 選択肢を表示
-            available = [pid for pid in performer_ids if pid not in used_ids]
-            if not available:
-                print(f"  全出演者が割り当て済みです。残りはスキップします。")
-                break
-
-            print(f"\n  この話者は誰ですか？")
-            for i, pid in enumerate(available):
-                name = performer_names.get(pid, pid)
-                print(f"    {i+1}. {pid} ({name})")
-            print(f"    s. スキップ（この動画に出ていない人）")
-            print(f"    q. 中断")
-
-            while True:
-                try:
-                    choice = input(f"\n  選択 [1-{len(available)}/s/q]: ").strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    print()
-                    return {}
-
-                if choice == "q":
-                    return {}
-                if choice == "s":
-                    print(f"  → {label} をスキップしました。")
-                    break
-
-                try:
-                    idx = int(choice) - 1
-                    if 0 <= idx < len(available):
-                        pid = available[idx]
-                        assignments[label] = pid
-                        used_ids.add(pid)
-                        name = performer_names.get(pid, pid)
-                        print(f"  → {label} = {pid} ({name})")
-                        break
-                    else:
-                        print(f"  1〜{len(available)} の数字を入力してください。")
-                except ValueError:
-                    print(f"  1〜{len(available)} の数字、's'、または 'q' を入力してください。")
-
-        return assignments
-
     def _save_references(self, video_path: str,
                          clusters: dict[str, list[SpeakerSegment]],
                          assignments: dict[str, str]) -> None:
@@ -230,7 +545,6 @@ class SetupWizard:
             person_dir.mkdir(parents=True, exist_ok=True)
 
             segs = clusters[cluster_label]
-            # 長い順に最大5セグメントを基準音声として保存
             sorted_segs = sorted(segs, key=lambda s: s.duration, reverse=True)
             selected = sorted_segs[:5]
 
