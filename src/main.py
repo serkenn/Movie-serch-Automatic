@@ -90,6 +90,21 @@ def list_speakers(ref_dir):
 
 @cli.command()
 @click.option("--video", "-v", type=click.Path(exists=True), required=True,
+              help="出演者がわかっている動画ファイル")
+@click.option("--config", "-c", default="config.yaml",
+              help="設定ファイルのパス")
+@click.option("--hf-token", envvar="HF_TOKEN", default=None,
+              help="HuggingFace トークン（pyannote用）")
+def setup(video, config, hf_token):
+    """初回セットアップ: 動画から話者を自動分離し、ラベル付けで基準データを作成。"""
+    from src.setup_wizard import SetupWizard
+
+    wizard = SetupWizard(config_path=config)
+    wizard.run(video, hf_token=hf_token)
+
+
+@cli.command()
+@click.option("--video", "-v", type=click.Path(exists=True), required=True,
               help="テスト対象の動画ファイル")
 @click.option("--config", "-c", default="config.yaml",
               help="設定ファイルのパス")

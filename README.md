@@ -121,19 +121,37 @@ cd Movie-serch
 pip install -r requirements.txt
 ```
 
-### 基準音声の準備
+### 基準音声の準備（自動セットアップ）
 
-各出演者の音声サンプルを配置する（1人あたり 10〜30秒、その人だけが話している区間）。
+出演者がわかっている動画を1本用意して、セットアップコマンドを実行するだけ。
+音声の切り出しは自動で行われ、「この声は誰？」と聞かれるので番号で答えるだけ。
+
+```bash
+python src/main.py setup --video 出演者がわかる動画.mp4
+```
 
 ```
-data/reference_voices/
-├── person_a/
-│   └── sample.wav
-├── person_b/
-│   └── sample.wav
-└── person_c/
-    └── sample.wav
+[Step 1/5] 音声を抽出中...
+[Step 2/5] 話者を自動分離中...
+  3 人の話者を検出しました。
+[Step 3/5] 各話者の音声サンプルを作成中...
+[Step 4/5] 話者のラベル付け
+
+  --- 話者クラスタ: speaker_0 ---
+  発話区間: 12区間, 合計 45.3秒
+  この話者は誰ですか？
+    1. person_a (出演者A)
+    2. person_b (出演者B)
+    3. person_c (出演者C)
+  選択 [1-3/s/q]: 1
+  → speaker_0 = person_a (出演者A)
+  ...
+
+[Step 5/5] 基準音声を保存中...
+セットアップ完了!
 ```
+
+> 手動で配置する場合は `data/reference_voices/person_a/sample.wav` のように直接配置も可能。
 
 ## 使い方
 
