@@ -29,6 +29,9 @@ click>=8.1.7
 
 # Web UI
 flask>=3.0.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+PySocks>=1.7.1
 
 # Optional: Google Sheets export
 gspread>=6.0.0

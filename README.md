@@ -3,22 +3,24 @@
 [![CI](https://github.com/serkenn/Movie-serch-Automatic/actions/workflows/ci.yml/badge.svg)](https://github.com/serkenn/Movie-serch-Automatic/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 
-動画内の出演者を声紋中心で判定し、結果を JSON/CSV/スプレッドシートへ出力する自動分析ツールです。
+動画内の出演者を声紋中心で判定し、取得・解析・記録まで自動化するツールです。
 
-## 主な機能
+## できること
 
 - 声紋分析（Resemblyzer）による出演者判定
-- 話者分離（pyannote / フォールバックあり）
+- 話者分離（pyannote / フォールバック）
 - 視覚補助分析（YOLOv8 + OpenCLIP, 任意）
-- 自動セットアップ（`setup`）
-- バッチ差分解析（`auto-analyze`）
-- 取得〜解析〜記録の一括実行（`ingest-analyze`）
-- Fantia投稿IDベースのファイル整理（`organize-media`）
-- Webダッシュボード（統計/最適化）
+- セットアップ自動化（`setup`）
+- 差分バッチ解析（`auto-analyze`）
+- 取得→解析→記録（`ingest-analyze`）
+- Fantia投稿IDベースのメディア整理（`organize-media`）
+- Web GUI（結果確認、ingest実行、CSVプレビュー、閾値設定）
+- IP/所在地と Origin IP 警告（Web/CLI）
+- 上り/下り通信量の可視化（Web/CLI）
 
 ## クイックスタート
 
-### 1) セットアップ
+### 1. セットアップ
 
 ```bash
 git clone https://github.com/serkenn/Movie-serch-Automatic.git
@@ -38,39 +40,36 @@ brew install ffmpeg
 sudo apt-get update && sudo apt-get install -y ffmpeg
 ```
 
-### 2) 基準音声登録（初回のみ）
+### 2. 基準音声登録（初回のみ）
 
 ```bash
 python -m src.main setup --video /path/to/known_video.mp4
 ```
 
-### 3) 解析実行
+### 3. 解析
 
 ```bash
 python -m src.main auto-analyze --dir /path/to/videos --format both
 ```
 
-結果は `output/results.json` / `output/results.csv` に保存されます。
+出力先: `output/results.json`, `output/results.csv`
 
-## 主要コマンド
+## よく使うコマンド
 
-### `analyze`
-単体動画またはフォルダ解析。
+### 単体/フォルダ解析
 
 ```bash
 python -m src.main analyze --video /path/to/video.mp4
 python -m src.main analyze --dir /path/to/videos
 ```
 
-### `auto-analyze`
-フォルダ内動画を一括解析。既解析スキップ・再帰検索に対応。
+### バッチ差分解析
 
 ```bash
 python -m src.main auto-analyze --dir /path/to/videos --recursive --skip-analyzed
 ```
 
-### `ingest-analyze`
-Telegram URL / Magnet Link 取得後に解析し、CSV履歴やGoogle Sheetsへ追記。
+### 取得→解析→記録
 
 ```bash
 python -m src.main ingest-analyze \
@@ -91,8 +90,13 @@ python -m src.main ingest-analyze \
   --sheet-name Sheet1
 ```
 
-### `organize-media`
-`fantia-posts-<id>` 形式のファイル名からメタデータを取得し、整理。
+### URLからmagnet抽出して実行
+
+```bash
+python -m src.main add-magnets-from-url "https://example.com/page-with-magnets"
+```
+
+### メディア整理
 
 ```bash
 python -m src.main organize-media \
@@ -102,12 +106,33 @@ python -m src.main organize-media \
   --dry-run
 ```
 
-### `web`
-ダッシュボード起動。
+### ネットワーク状態確認（IP/所在地/通信量）
+
+```bash
+python -m src.main network-status
+python -m src.main network-status --mullvad-socks5 --watch --interval 10
+```
+
+## Web GUI
 
 ```bash
 python -m src.main web --port 5000
 ```
+
+主な画面:
+
+- `/` ダッシュボード
+- `/results` 解析結果
+- `/stats` 統計
+- `/optimizer` 閾値調整
+- `/ingest` Telegram/Magnet/Proxy 指定で実行 + 通信量グラフ
+- `/csv-preview` CSVプレビュー
+
+補足:
+
+- ヘッダーに現在IP/所在地を表示
+- プロキシ指定時に Origin IP のままなら警告
+- `/ingest` で上り/下り通信（Mbps）をリアルタイム表示
 
 ## CLI一覧
 
@@ -116,49 +141,53 @@ python -m src.main web --port 5000
 | `setup` | 基準音声の自動登録 |
 | `analyze` | 単体/フォルダ解析 |
 | `auto-analyze` | バッチ解析（差分実行対応） |
-| `ingest-analyze` | 取得→解析→記録の一括実行 |
+| `ingest-analyze` | 取得→解析→記録 |
+| `add-magnets-from-url` | URLからmagnet抽出して取得→解析 |
 | `organize-media` | Fantia投稿IDベースの整理 |
+| `network-status` | IP/所在地/通信量の表示・監視 |
 | `list-speakers` | 登録済み話者一覧 |
-| `test-voice` | 声紋照合のデバッグ実行 |
-| `web` | 結果可視化ダッシュボード |
+| `test-voice` | 声紋照合デバッグ |
+| `web` | Web GUI |
 
-## 設定 (`config.yaml`)
+## 設定
 
-代表的な項目:
+設定ファイル: `config.yaml`
+
+主なキー:
 
 - `performers`: 出演者ID/表示名
-- `thresholds.voice_similarity`: 判定閾値
-- `thresholds.combined_weight_voice`: 統合時の声紋重み
-- `paths.reference_voices`: 基準音声パス
-- `paths.videos`: 入力動画パス
+- `paths.*`: 参照音声・動画・出力のパス
+- `thresholds.*`: 声紋/視覚の閾値、重み
+- `diarization.*`: 話者分離の設定
+- `visual.*`: 視覚分析の設定
 
-必要に応じて `config.yaml` を編集してください。
+## 出力ファイル
 
-## 出力
-
-- `output/results.json`: 詳細結果（機械読取向け）
-- `output/results.csv`: 一覧結果（表計算向け）
-- `output/results_log.csv`: 解析履歴（`ingest-analyze` 利用時）
+- `output/results.json`: 詳細結果
+- `output/results.csv`: 一覧結果
+- `output/results_log.csv`: 履歴（ingest系で追記）
 
 ## テストとCI
 
-ローカルテスト:
+ローカル:
 
 ```bash
 python -m pytest tests/ -v --tb=short
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`):
+CI (`.github/workflows/ci.yml`):
 
 - `main` への push / PR で実行
 - Python 3.10 / 3.11 / 3.12
-- 3.12 は実験枠（失敗許容）、3.10/3.11 を主判定
+- 3.12 は実験枠（失敗許容）
 
-## 注意事項
+## 重要な注意
 
-- 本ツールは、権利・利用規約・法令を遵守して利用してください。
-- 取得元サービス（Telegram/Fantia 等）の規約に反する利用は行わないでください。
+- 法令・利用規約・権利に従って利用してください。
+- Magnet/Torrent は仕様上、ピア通信・上り通信が発生する可能性があります。
+- `aria2c --seed-time=0` は完了後シード抑制であり、ダウンロード中の上り通信ゼロを保証しません。
+- 「ピア登録なし / 上り通信なし」を厳密に求める場合は Magnet/Torrent を使用しないでください。
 
 ## ライセンス
 
-Private repository のため、利用条件は管理者ポリシーに従ってください。
+Private repository。利用条件は管理者ポリシーに従ってください。

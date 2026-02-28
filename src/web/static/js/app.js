@@ -10,3 +10,27 @@ async function fetchJSON(url) {
     }
     return resp.json();
 }
+
+async function refreshNetworkBadge() {
+    const badge = document.getElementById('network-badge');
+    if (!badge) return;
+    try {
+        const data = await fetchJSON('/api/network/status');
+        if (data.error) {
+            badge.className = 'network-badge error';
+            badge.textContent = `Network: ${data.error}`;
+            return;
+        }
+        const loc = [data.city, data.region, data.country].filter(Boolean).join(', ') || '-';
+        badge.className = data.warning ? 'network-badge warning' : 'network-badge';
+        badge.textContent = `IP ${data.effective_ip || '-'} | ${loc}`;
+    } catch (e) {
+        badge.className = 'network-badge error';
+        badge.textContent = `Network: ${e.message}`;
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    refreshNetworkBadge();
+    setInterval(refreshNetworkBadge, 15000);
+});

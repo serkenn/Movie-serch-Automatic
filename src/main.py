@@ -6,6 +6,7 @@ from pathlib import Path
 
 import click
 
+from src.network_status import get_network_status, get_traffic_status
 from src.pipeline import AnalysisPipeline
 from src.output.reporter import append_csv_log as append_csv_history
 from src.output.reporter import save_results, print_summary
@@ -232,6 +233,59 @@ def _save_incremental(results, output_dir, fmt, existing_names):
         pass  # 途中保存の失敗は無視
 
 
+def _print_network_status(proxy: str | None, expect_proxy: bool = False) -> None:
+    """現在のIP/所在地をCLIへ表示する。"""
+    status = get_network_status(proxy=proxy, expect_proxy=expect_proxy)
+    traffic = get_traffic_status()
+
+    if status.error:
+        click.echo(f"Network: {status.error}", err=True)
+    else:
+        place = ", ".join([p for p in [status.city, status.region, status.country] if p]) or "-"
+        click.echo(
+            f"Network: IP={status.effective_ip} / Origin={status.origin_ip} / Loc={place}"
+        )
+        if status.warning:
+            click.echo(f"警告: {status.warning}", err=True)
+
+    if traffic.error:
+        click.echo(f"Traffic: {traffic.error}", err=True)
+        return
+    click.echo(
+        "Traffic: "
+        f"up={traffic.upload_mbps:.3f} Mbps "
+        f"down={traffic.download_mbps:.3f} Mbps "
+        f"(total up={traffic.bytes_sent_total}B / down={traffic.bytes_recv_total}B)"
+    )
+
+
+@cli.command(name="network-status")
+@click.option("--proxy", default=None, help="HTTP/HTTPS/SOCKS プロキシURL")
+@click.option("--mullvad-socks5/--no-mullvad-socks5", default=False,
+              help="Mullvad のローカルSOCKS5 (socks5h://127.0.0.1:1080) を使う")
+@click.option("--watch/--no-watch", default=False,
+              help="リアルタイム監視（Ctrl+Cで停止）")
+@click.option("--interval", default=10, type=int,
+              help="監視間隔（秒）")
+def network_status_cmd(proxy, mullvad_socks5, watch, interval):
+    """現在のIPアドレス/所在地を表示する。"""
+    effective_proxy = "socks5h://127.0.0.1:1080" if mullvad_socks5 else proxy
+    expect_proxy = bool(effective_proxy)
+
+    if not watch:
+        _print_network_status(proxy=effective_proxy, expect_proxy=expect_proxy)
+        return
+
+    import time
+    click.echo("リアルタイム監視を開始します（停止: Ctrl+C）")
+    try:
+        while True:
+            _print_network_status(proxy=effective_proxy, expect_proxy=expect_proxy)
+            time.sleep(max(1, interval))
+    except KeyboardInterrupt:
+        click.echo("監視を停止しました。")
+
+
 @cli.command()
 @click.option("--config", "-c", default="config.yaml",
               help="設定ファイルのパス")
@@ -322,6 +376,7 @@ def ingest_analyze(
         sys.exit(1)
 
     effective_proxy = "socks5h://127.0.0.1:1080" if mullvad_socks5 else proxy
+    _print_network_status(proxy=effective_proxy, expect_proxy=bool(effective_proxy))
 
     ingestor = VideoIngestor(download_dir=download_dir)
     try:
@@ -383,6 +438,61 @@ def ingest_analyze(
             click.echo(f"Google Sheets 追記エラー: {e}", err=True)
     elif sheet_id or sheet_credentials:
         click.echo("Google Sheets 連携には --sheet-id と --sheet-credentials の両方が必要です。")
+
+
+@cli.command(name="add-magnets-from-url")
+@click.argument("url")
+@click.option("--download-dir", default="data/videos",
+              help="動画保存先ディレクトリ")
+@click.option("--config", default="config.yaml",
+              help="設定ファイルのパス")
+@click.option("--output", default="output",
+              help="解析結果の出力ディレクトリ")
+@click.option("--format", "-f", "fmt", default="both",
+              type=click.Choice(["json", "csv", "both"]),
+              help="出力形式")
+@click.option("--visual/--no-visual", default=False,
+              help="視覚分析を有効にする")
+@click.option("--hf-token", envvar="HF_TOKEN", default=None,
+              help="HuggingFace トークン（pyannote用）")
+@click.option("--proxy", default=None, help="HTTP/HTTPS/SOCKS プロキシURL")
+@click.option("--mullvad-socks5/--no-mullvad-socks5", default=False,
+              help="Mullvad のローカルSOCKS5 (socks5h://127.0.0.1:1080) を使う")
+def add_magnets_from_url(url, download_dir, config, output, fmt, visual, hf_token, proxy, mullvad_socks5):
+    """指定URLからmagnetリンクを抽出し、取得と解析を実行する。"""
+    from src.ingest import fetch_magnets_from_url
+
+    click.echo(f"URLからmagnetリンクを抽出中: {url}")
+    try:
+        magnets = fetch_magnets_from_url(url)
+    except Exception as e:
+        click.echo(f"magnetリンク抽出失敗: {e}", err=True)
+        sys.exit(1)
+
+    if not magnets:
+        click.echo("magnetリンクが見つかりませんでした。", err=True)
+        sys.exit(1)
+
+    click.echo(f"{len(magnets)}件のmagnetリンクを取得。ダウンロード・解析を開始します。")
+    effective_proxy = "socks5h://127.0.0.1:1080" if mullvad_socks5 else proxy
+    ingest_analyze(
+        config=config,
+        download_dir=download_dir,
+        telegram_urls=(),
+        magnets=tuple(magnets),
+        source_file=None,
+        proxy=effective_proxy,
+        mullvad_socks5=False,
+        output=output,
+        fmt=fmt,
+        visual=visual,
+        hf_token=hf_token,
+        skip_analyzed=True,
+        append_csv_log=True,
+        sheet_id=None,
+        sheet_name="Sheet1",
+        sheet_credentials=None,
+    )
 
 
 def append_csv_log_fn(results, output_dir):

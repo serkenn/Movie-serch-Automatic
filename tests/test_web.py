@@ -3,10 +3,13 @@
 import json
 import os
 import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
 
+import src.web.app as web_app
 from src.web.app import create_app
 
 
@@ -75,6 +78,10 @@ def app_with_data():
         results_path = os.path.join(output_dir, "results.json")
         with open(results_path, "w", encoding="utf-8") as f:
             json.dump(SAMPLE_RESULTS, f)
+        csv_path = os.path.join(output_dir, "results.csv")
+        with open(csv_path, "w", encoding="utf-8") as f:
+            f.write("動画名,長さ,出演者数,サマリー\n")
+            f.write("test.mp4,2:00,1,A\n")
 
         app = create_app(config_path=config_path, output_dir=output_dir)
         app.config["TESTING"] = True
@@ -106,6 +113,16 @@ class TestPages:
         resp = client.get("/optimizer")
         assert resp.status_code == 200
         assert b"Optimizer" in resp.data
+
+    def test_ingest_page(self, client):
+        resp = client.get("/ingest")
+        assert resp.status_code == 200
+        assert b"Ingest" in resp.data
+
+    def test_csv_preview_page(self, client):
+        resp = client.get("/csv-preview")
+        assert resp.status_code == 200
+        assert b"CSV Preview" in resp.data
 
 
 class TestAPI:
@@ -184,3 +201,103 @@ class TestAPI:
             content_type="application/json",
         )
         assert resp.status_code == 400
+
+    def test_ingest_run_requires_sources(self, client):
+        resp = client.post("/api/ingest/run", json={})
+        assert resp.status_code == 400
+        data = resp.get_json()
+        assert "error" in data
+
+    def test_ingest_run_success(self, client, monkeypatch):
+        monkeypatch.setattr(web_app, "run_preflight", lambda check_gpu_available=False: None)
+
+        mock_ingestor = MagicMock()
+        mock_ingestor.ingest.return_value = []
+        monkeypatch.setattr(web_app, "VideoIngestor", lambda download_dir: mock_ingestor)
+
+        mock_pipeline = MagicMock()
+        mock_pipeline._load_analyzed_names.return_value = set()
+        mock_pipeline.analyze_video.return_value = {"video": "x.mp4"}
+        mock_pipeline.setup.return_value = None
+        monkeypatch.setattr(web_app, "AnalysisPipeline", lambda config_path: mock_pipeline)
+
+        monkeypatch.setattr(
+            web_app,
+            "collect_video_files",
+            lambda download_dir: {Path("/tmp/test1.mp4")},
+        )
+        monkeypatch.setattr(
+            web_app,
+            "save_results",
+            lambda results, output, fmt="both": [Path(output) / "results.json", Path(output) / "results.csv"],
+        )
+        monkeypatch.setattr(
+            web_app,
+            "append_csv_log",
+            lambda results, output_path: Path(output_path),
+        )
+
+        resp = client.post(
+            "/api/ingest/run",
+            json={
+                "magnets": "magnet:?xt=urn:btih:AAAA",
+                "download_dir": "/tmp",
+                "output_dir": "/tmp",
+                "config_path": "/tmp/config.yaml",
+                "skip_analyzed": False,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "ok"
+        assert data["analyzed_count"] == 1
+
+    def test_csv_preview_api(self, client):
+        resp = client.get("/api/csv-preview")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "headers" in data
+        assert data["row_count"] >= 1
+        assert data["returned"] >= 1
+
+    def test_csv_preview_api_not_found(self, client):
+        resp = client.get("/api/csv-preview?file=missing.csv")
+        assert resp.status_code == 404
+
+    def test_network_status_api(self, client, monkeypatch):
+        class DummyStatus:
+            def to_dict(self):
+                return {
+                    "effective_ip": "1.2.3.4",
+                    "origin_ip": "1.2.3.4",
+                    "city": "Tokyo",
+                    "region": "Tokyo",
+                    "country": "JP",
+                    "warning": None,
+                    "error": None,
+                }
+
+        monkeypatch.setattr(web_app, "get_network_status", lambda proxy=None, expect_proxy=False: DummyStatus())
+        resp = client.get("/api/network/status")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["effective_ip"] == "1.2.3.4"
+
+    def test_network_traffic_api(self, client, monkeypatch):
+        class DummyTraffic:
+            def to_dict(self):
+                return {
+                    "bytes_sent_total": 1000,
+                    "bytes_recv_total": 2000,
+                    "upload_bps": 10.0,
+                    "download_bps": 20.0,
+                    "upload_mbps": 0.00008,
+                    "download_mbps": 0.00016,
+                    "error": None,
+                }
+
+        monkeypatch.setattr(web_app, "get_traffic_status", lambda: DummyTraffic())
+        resp = client.get("/api/network/traffic")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["bytes_sent_total"] == 1000

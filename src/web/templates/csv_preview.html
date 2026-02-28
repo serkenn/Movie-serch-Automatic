@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}CSV Preview{% endblock %}
+{% block page_title %}CSV Preview{% endblock %}
+
+{% block content %}
+<div class="panel">
+    <h3>CSV Viewer</h3>
+    <form id="csv-form" class="form-inline">
+        <div class="form-group">
+            <label for="csv-file">File Name</label>
+            <input id="csv-file" type="text" value="results.csv">
+        </div>
+        <div class="form-group">
+            <label for="csv-limit">Row Limit</label>
+            <input id="csv-limit" type="number" min="1" max="2000" step="1" value="200">
+        </div>
+        <button type="submit" class="btn">Load Preview</button>
+    </form>
+    <p id="csv-meta" class="muted" style="margin-top:10px;"></p>
+</div>
+
+<div class="panel">
+    <div id="csv-table" class="table-scroll"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadCsvPreview() {
+    const file = document.getElementById('csv-file').value.trim() || 'results.csv';
+    const limit = parseInt(document.getElementById('csv-limit').value, 10) || 200;
+
+    const data = await fetchJSON(`/api/csv-preview?file=${encodeURIComponent(file)}&limit=${encodeURIComponent(limit)}`);
+    const meta = `File: ${data.file} | Total: ${data.row_count} | Returned: ${data.returned}${data.truncated ? ' (truncated)' : ''}`;
+    document.getElementById('csv-meta').textContent = meta;
+
+    if (!data.rows || data.rows.length === 0) {
+        document.getElementById('csv-table').innerHTML = '<p class="muted">No rows</p>';
+        return;
+    }
+
+    const headers = data.headers || Object.keys(data.rows[0]);
+    let html = '<table><thead><tr>';
+    headers.forEach(h => { html += `<th>${h}</th>`; });
+    html += '</tr></thead><tbody>';
+
+    data.rows.forEach(row => {
+        html += '<tr>';
+        headers.forEach(h => {
+            const val = row[h] ?? '';
+            html += `<td>${String(val)}</td>`;
+        });
+        html += '</tr>';
+    });
+    html += '</tbody></table>';
+    document.getElementById('csv-table').innerHTML = html;
+}
+
+document.getElementById('csv-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+        await loadCsvPreview();
+    } catch (err) {
+        document.getElementById('csv-meta').textContent = `ERROR: ${err.message}`;
+        document.getElementById('csv-table').innerHTML = '';
+    }
+});
+
+document.addEventListener('DOMContentLoaded', loadCsvPreview);
+</script>
+{% endblock %}

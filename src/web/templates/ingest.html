@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+{% block title %}Ingest{% endblock %}
+{% block page_title %}Ingest & Analyze{% endblock %}
+
+{% block content %}
+<div class="panel">
+    <h3>Source Inputs</h3>
+    <div class="grid-2">
+        <div class="form-group">
+            <label for="telegram-urls">Telegram URLs (1行1件)</label>
+            <textarea id="telegram-urls" rows="7" placeholder="https://t.me/channel/123"></textarea>
+        </div>
+        <div class="form-group">
+            <label for="magnets">Magnet Links (1行1件)</label>
+            <textarea id="magnets" rows="7" placeholder="magnet:?xt=urn:btih:..."></textarea>
+        </div>
+    </div>
+    <div class="form-group">
+        <label for="magnet-source-url">Magnet抽出URL（任意）</label>
+        <input id="magnet-source-url" type="text" placeholder="https://example.com/page-with-magnets">
+    </div>
+</div>
+
+<div class="panel">
+    <h3>Execution Options</h3>
+    <div class="grid-2">
+        <div class="form-group">
+            <label for="download-dir">Download Directory</label>
+            <input id="download-dir" type="text" value="data/videos">
+        </div>
+        <div class="form-group">
+            <label for="output-dir">Output Directory</label>
+            <input id="output-dir" type="text" value="output">
+        </div>
+    </div>
+    <div class="grid-2">
+        <div class="form-group">
+            <label for="config-path">Config Path</label>
+            <input id="config-path" type="text" value="config.yaml">
+        </div>
+        <div class="form-group">
+            <label for="proxy">Proxy URL (任意)</label>
+            <input id="proxy" type="text" placeholder="socks5h://127.0.0.1:1080">
+        </div>
+    </div>
+    <div class="check-row">
+        <label><input type="checkbox" id="mullvad-socks5"> Use Mullvad SOCKS5 (127.0.0.1:1080)</label>
+        <label><input type="checkbox" id="visual"> Enable Visual Analysis</label>
+        <label><input type="checkbox" id="skip-analyzed" checked> Skip Analyzed</label>
+        <label><input type="checkbox" id="append-csv-log" checked> Append CSV Log</label>
+    </div>
+    <button id="run-btn" class="btn">Run Ingest + Analyze</button>
+</div>
+
+<div class="panel">
+    <h3>Network Status (Realtime)</h3>
+    <pre id="network-status-box" class="log-box">Loading...</pre>
+</div>
+
+<div class="panel">
+    <h3>Traffic Visualization (Upload / Download)</h3>
+    <canvas id="traffic-chart"></canvas>
+</div>
+
+<div class="panel" id="result-panel" style="display:none">
+    <h3>Run Result</h3>
+    <pre id="run-result" class="log-box"></pre>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let trafficChart = null;
+const trafficLabels = [];
+const uploadSeries = [];
+const downloadSeries = [];
+
+async function refreshIngestNetworkStatus() {
+    const payload = {
+        proxy: document.getElementById('proxy').value.trim(),
+        mullvad_socks5: document.getElementById('mullvad-socks5').checked,
+        expect_proxy: (
+            document.getElementById('mullvad-socks5').checked ||
+            document.getElementById('proxy').value.trim().length > 0
+        ),
+    };
+    const box = document.getElementById('network-status-box');
+    try {
+        const resp = await fetch('/api/network/status', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        box.textContent = JSON.stringify(data, null, 2);
+    } catch (e) {
+        box.textContent = `ERROR: ${e.message}`;
+    }
+}
+
+async function refreshTraffic() {
+    try {
+        const data = await fetchJSON('/api/network/traffic');
+        const now = new Date();
+        const label = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+        trafficLabels.push(label);
+        uploadSeries.push(Number(data.upload_mbps || 0));
+        downloadSeries.push(Number(data.download_mbps || 0));
+
+        const maxPoints = 60;
+        while (trafficLabels.length > maxPoints) {
+            trafficLabels.shift();
+            uploadSeries.shift();
+            downloadSeries.shift();
+        }
+
+        if (!trafficChart) {
+            trafficChart = new Chart(document.getElementById('traffic-chart'), {
+                type: 'line',
+                data: {
+                    labels: trafficLabels,
+                    datasets: [
+                        { label: 'Upload Mbps', data: uploadSeries, borderColor: '#ef4444', tension: 0.25, fill: false },
+                        { label: 'Download Mbps', data: downloadSeries, borderColor: '#10b981', tension: 0.25, fill: false },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    animation: false,
+                    scales: { y: { beginAtZero: true, title: { display: true, text: 'Mbps' } } },
+                },
+            });
+        } else {
+            trafficChart.update('none');
+        }
+    } catch (e) {
+        // ignore periodic traffic fetch errors
+    }
+}
+
+document.getElementById('run-btn').addEventListener('click', async () => {
+    const button = document.getElementById('run-btn');
+    button.disabled = true;
+    button.textContent = 'Running...';
+
+    const payload = {
+        telegram_urls: document.getElementById('telegram-urls').value,
+        magnets: document.getElementById('magnets').value,
+        magnet_source_url: document.getElementById('magnet-source-url').value.trim(),
+        download_dir: document.getElementById('download-dir').value.trim(),
+        output_dir: document.getElementById('output-dir').value.trim(),
+        config_path: document.getElementById('config-path').value.trim(),
+        proxy: document.getElementById('proxy').value.trim(),
+        mullvad_socks5: document.getElementById('mullvad-socks5').checked,
+        visual: document.getElementById('visual').checked,
+        skip_analyzed: document.getElementById('skip-analyzed').checked,
+        append_csv_log: document.getElementById('append-csv-log').checked,
+    };
+
+    const panel = document.getElementById('result-panel');
+    const box = document.getElementById('run-result');
+    panel.style.display = 'block';
+    box.textContent = 'Starting...';
+
+    try {
+        const resp = await fetch('/api/ingest/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            throw new Error(data.error || 'Unknown error');
+        }
+        box.textContent = JSON.stringify(data, null, 2);
+    } catch (e) {
+        box.textContent = `ERROR: ${e.message}`;
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Run Ingest + Analyze';
+    }
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+    refreshIngestNetworkStatus();
+    refreshTraffic();
+    setInterval(refreshIngestNetworkStatus, 10000);
+    setInterval(refreshTraffic, 2000);
+});
+</script>
+{% endblock %}

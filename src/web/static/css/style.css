@@ -74,6 +74,10 @@ body {
     padding: 20px 32px;
     border-bottom: 1px solid var(--border);
     background: var(--bg-card);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
 }
 
 .page-header h1 { font-size: 20px; font-weight: 600; }
@@ -246,8 +250,53 @@ table.compact td, table.compact th { padding: 6px 8px; }
     border-color: var(--accent);
 }
 
+.form-group textarea {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 14px;
+    width: 100%;
+    resize: vertical;
+}
+
+.form-group input[type="text"] { width: 100%; }
+
+.check-row {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin: 10px 0 18px;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.check-row input { margin-right: 6px; }
+
+.log-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px;
+    white-space: pre-wrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: var(--text);
+    max-height: 340px;
+    overflow: auto;
+}
+
 /* === Status text === */
 .success { color: var(--success); }
 .warning { color: var(--warning); }
 .error { color: var(--error); }
 .muted { color: var(--text-muted); font-style: italic; }
+
+.network-badge {
+    font-size: 12px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-muted);
+}

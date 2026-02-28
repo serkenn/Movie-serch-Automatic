@@ -142,3 +142,28 @@ class VideoIngestor:
                     telegram_urls.append(clean)
 
         return telegram_urls, magnets
+
+
+def fetch_magnets_from_url(url: str, timeout: int = 15) -> list[str]:
+    """指定URLのHTMLから magnet: リンクを抽出する。"""
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+    except Exception as e:
+        raise RuntimeError(
+            "この機能には requests と beautifulsoup4 が必要です。"
+        ) from e
+
+    try:
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(f"URL取得失敗: {e}") from e
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    magnets = [
+        anchor["href"]
+        for anchor in soup.find_all("a", href=True)
+        if anchor["href"].startswith("magnet:")
+    ]
+    return magnets

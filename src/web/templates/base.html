@@ -22,11 +22,16 @@
                 <span class="icon">&#9650;</span> Stats</a></li>
             <li><a href="/optimizer" class="{% if request.path == '/optimizer' %}active{% endif %}">
                 <span class="icon">&#9881;</span> Optimizer</a></li>
+            <li><a href="/ingest" class="{% if request.path == '/ingest' %}active{% endif %}">
+                <span class="icon">&#10133;</span> Ingest</a></li>
+            <li><a href="/csv-preview" class="{% if request.path == '/csv-preview' %}active{% endif %}">
+                <span class="icon">&#9776;</span> CSV</a></li>
         </ul>
     </nav>
     <main class="content">
         <header class="page-header">
             <h1>{% block page_title %}{% endblock %}</h1>
+            <div id="network-badge" class="network-badge muted">Network: loading...</div>
         </header>
         <div class="page-body">
             {% block content %}{% endblock %}
