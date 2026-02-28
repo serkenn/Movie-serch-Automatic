@@ -4,7 +4,7 @@ librosa>=0.10.1
 soundfile>=0.12.1
 
 # Required for webrtcvad (resemblyzer dependency) on Python 3.12+
-setuptools>=69.0.0
+setuptools>=69.0.0,<81
 
 # Speaker embedding & verification
 resemblyzer>=0.1.3
