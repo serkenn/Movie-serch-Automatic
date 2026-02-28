@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from src.pipeline import AnalysisPipeline
+from src.output.reporter import append_csv_log as append_csv_history
 from src.output.reporter import save_results, print_summary
 
 
@@ -256,6 +257,174 @@ def web(config, output, host, port):
     click.echo(f"\nWeb ダッシュボードを起動中: http://{host}:{port}")
     click.echo("停止するには Ctrl+C を押してください。\n")
     app.run(host=host, port=port, debug=False)
+
+
+@cli.command(name="ingest-analyze")
+@click.option("--config", "-c", default="config.yaml",
+              help="設定ファイルのパス")
+@click.option("--download-dir", default="data/videos",
+              help="取得動画の保存先ディレクトリ")
+@click.option("--telegram-url", "telegram_urls", multiple=True,
+              help="取得対象の Telegram URL（複数指定可）")
+@click.option("--magnet", "magnets", multiple=True,
+              help="取得対象の Magnet Link（複数指定可）")
+@click.option("--source-file", type=click.Path(exists=True),
+              help="取得元リストファイル（1行1ソース）")
+@click.option("--proxy", default=None,
+              help="HTTP/HTTPS/SOCKS プロキシURL")
+@click.option("--mullvad-socks5/--no-mullvad-socks5", default=False,
+              help="Mullvad のローカルSOCKS5 (socks5h://127.0.0.1:1080) を使う")
+@click.option("--output", "-o", default="output",
+              help="解析結果の出力ディレクトリ")
+@click.option("--format", "-f", "fmt", default="both",
+              type=click.Choice(["json", "csv", "both"]),
+              help="出力形式")
+@click.option("--visual/--no-visual", default=False,
+              help="視覚分析を有効にする")
+@click.option("--hf-token", envvar="HF_TOKEN", default=None,
+              help="HuggingFace トークン（pyannote用）")
+@click.option("--skip-analyzed/--no-skip", default=True,
+              help="解析済み動画をスキップする")
+@click.option("--append-csv-log/--no-append-csv-log", default=True,
+              help="履歴CSV(output/results_log.csv)に追記する")
+@click.option("--sheet-id", default=None,
+              help="Google Sheets のスプレッドシートID")
+@click.option("--sheet-name", default="Sheet1",
+              help="Google Sheets のワークシート名")
+@click.option("--sheet-credentials", default=None,
+              help="GoogleサービスアカウントJSONのパス")
+def ingest_analyze(
+    config,
+    download_dir,
+    telegram_urls,
+    magnets,
+    source_file,
+    proxy,
+    mullvad_socks5,
+    output,
+    fmt,
+    visual,
+    hf_token,
+    skip_analyzed,
+    append_csv_log,
+    sheet_id,
+    sheet_name,
+    sheet_credentials,
+):
+    """外部ソース取得→解析→CSV/Spreadsheet記録を一括実行する。"""
+    from src.ingest import VideoIngestor, collect_video_files
+    from src.preflight import PreflightError, run_preflight
+
+    try:
+        run_preflight(check_gpu_available=visual)
+    except PreflightError as e:
+        click.echo(f"エラー: {e}", err=True)
+        sys.exit(1)
+
+    effective_proxy = "socks5h://127.0.0.1:1080" if mullvad_socks5 else proxy
+
+    ingestor = VideoIngestor(download_dir=download_dir)
+    try:
+        ingestor.ingest(
+            telegram_urls=list(telegram_urls),
+            magnets=list(magnets),
+            source_file=source_file,
+            proxy=effective_proxy,
+        )
+    except Exception as e:
+        click.echo(f"取得エラー: {e}", err=True)
+        sys.exit(1)
+
+    click.echo("パイプラインを初期化中...")
+    pipeline = AnalysisPipeline(config_path=config)
+    pipeline.setup(enable_visual=visual, hf_token=hf_token)
+
+    all_videos = sorted(collect_video_files(download_dir))
+    if not all_videos:
+        click.echo("取得先に動画が見つかりませんでした。")
+        return
+
+    analyzed_names: set[str] = set()
+    if skip_analyzed:
+        analyzed_names = pipeline._load_analyzed_names(output)
+
+    targets = [v for v in all_videos if v.name not in analyzed_names]
+    if not targets:
+        click.echo("新規解析対象の動画はありません。")
+        return
+
+    results = []
+    total = len(targets)
+    for i, video in enumerate(targets, 1):
+        click.echo(f"  [{i}/{total}] 解析中: {video.name}")
+        result = pipeline.analyze_video(str(video))
+        results.append(result)
+
+    print_summary(results)
+    saved = save_results(results, output, fmt=fmt)
+    for path in saved:
+        click.echo(f"結果を保存しました: {path}")
+
+    if append_csv_log:
+        log_path = append_csv_log_fn(results, output)
+        click.echo(f"履歴CSVへ追記しました: {log_path}")
+
+    if sheet_id and sheet_credentials:
+        try:
+            from src.output.sheet_sync import append_results_to_sheet
+            count = append_results_to_sheet(
+                results=results,
+                sheet_id=sheet_id,
+                worksheet_name=sheet_name,
+                credentials_json=sheet_credentials,
+            )
+            click.echo(f"Google Sheetsへ追記しました: {count} 行")
+        except Exception as e:
+            click.echo(f"Google Sheets 追記エラー: {e}", err=True)
+    elif sheet_id or sheet_credentials:
+        click.echo("Google Sheets 連携には --sheet-id と --sheet-credentials の両方が必要です。")
+
+
+def append_csv_log_fn(results, output_dir):
+    """履歴CSVに追記する。"""
+    return append_csv_history(results, str(Path(output_dir) / "results_log.csv"))
+
+
+@cli.command(name="organize-media")
+@click.option("--input", "input_dir", type=click.Path(exists=True), required=True,
+              help="整理対象フォルダ")
+@click.option("--output", "output_dir", type=click.Path(), required=True,
+              help="整理済み出力先（site/creator/title.ext）")
+@click.option("--unknown", "unknown_dir", type=click.Path(), required=True,
+              help="未解決ファイルの出力先（creator/file）")
+@click.option("--dry-run", is_flag=True,
+              help="移動は行わず予定のみ表示")
+def organize_media_cmd(input_dir, output_dir, unknown_dir, dry_run):
+    """Fantia投稿IDベースでメディアファイルを整理する。"""
+    from src.media_organizer import organize_media
+
+    try:
+        moves = organize_media(
+            input_root=input_dir,
+            output_root=output_dir,
+            unknown_root=unknown_dir,
+            dry_run=dry_run,
+        )
+    except FileNotFoundError as e:
+        click.echo(f"エラー: {e}", err=True)
+        sys.exit(1)
+
+    if not moves:
+        click.echo("対象ファイルが見つかりませんでした。")
+        return
+
+    for src, dst in moves:
+        if dry_run:
+            click.echo(f"[DRY RUN] MOVE: {src} -> {dst}")
+        else:
+            click.echo(f"MOVE: {src} -> {dst}")
+
+    click.echo(f"完了: {len(moves)} 件")
 
 
 @cli.command()

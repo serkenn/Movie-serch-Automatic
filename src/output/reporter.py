@@ -89,6 +89,36 @@ def save_csv(results: list[VideoAnalysisResult], output_path: str) -> Path:
     return output_path
 
 
+def append_csv_log(results: list[VideoAnalysisResult], output_path: str) -> Path:
+    """分析結果をCSVに追記する（履歴保存用）。"""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    needs_header = not output_path.exists() or output_path.stat().st_size == 0
+    header = ["timestamp", "動画名", "長さ(秒)", "出演者数", "サマリー", "エラー"]
+
+    from datetime import datetime
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    with open(output_path, "a", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        if needs_header:
+            writer.writerow(header)
+
+        for result in results:
+            writer.writerow([
+                ts,
+                result.video_name,
+                round(result.duration, 2),
+                result.detected_count,
+                result.to_dict()["summary"],
+                " | ".join(result.errors),
+            ])
+
+    logger.info("CSV 追記完了: %s", output_path)
+    return output_path
+
+
 def save_results(results: list[VideoAnalysisResult], output_dir: str,
                  fmt: str = "json") -> list[Path]:
     """分析結果をファイルに保存する。

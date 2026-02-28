@@ -447,6 +447,8 @@ python src/main.py setup --video 出演者がわかる動画.mp4
 | `analyze` | 単一動画またはフォルダを解析して出演者を判定 |
 | `setup` | 基準音声のインタラクティブセットアップ |
 | `auto-analyze` | フォルダ内の全動画を自動バッチ解析 |
+| `ingest-analyze` | Telegram/Magnet 取得 → 解析 → CSV/Sheets 追記を一括実行 |
+| `organize-media` | Fantia投稿IDからタイトル取得して `site/作者/タイトル` へ整理 |
 | `web` | Web ダッシュボードを起動（統計・分析・閾値最適化） |
 | `list-speakers` | 登録済みの基準音声を一覧表示 |
 | `test-voice` | 声紋照合のテスト実行（デバッグ用） |
@@ -484,6 +486,43 @@ python src/main.py auto-analyze --dir /path/to/videos/ --recursive
 
 # 視覚分析も有効にして JSON + CSV 両方を出力
 python src/main.py auto-analyze --dir /path/to/videos/ --visual --format both
+```
+
+### 取得+解析+記録の一括実行（`ingest-analyze`）
+
+```bash
+# Mullvad ローカル SOCKS5 を使って Telegram / Magnet を取得し解析
+python src/main.py ingest-analyze \
+  --telegram-url https://t.me/example_channel/123 \
+  --magnet "magnet:?xt=urn:btih:..." \
+  --mullvad-socks5 \
+  --download-dir data/videos \
+  --format both
+```
+
+取得元をファイルで管理する場合は `--source-file` を使います（1行1ソース、`magnet:` または Telegram URL）。
+
+Google Sheets へ追記する場合:
+
+```bash
+python src/main.py ingest-analyze \
+  --source-file sources.txt \
+  --sheet-id <spreadsheet_id> \
+  --sheet-credentials /path/to/service_account.json \
+  --sheet-name Sheet1
+```
+
+### ファイル整理（`organize-media`）
+
+`fantia-posts-3035118.mp4` のようなファイル名から投稿IDを抽出し、
+Fantiaページのタイトル/作者名を使って移動します。
+
+```bash
+python src/main.py organize-media \
+  --input /path/to/raw_media \
+  --output /path/to/organized \
+  --unknown /path/to/unresolved \
+  --dry-run
 ```
 
 ### 視覚分析を有効にする
