@@ -1,6 +1,6 @@
 # Movie-serch
 
-[![CI](https://github.com/hirorogo/Movie-serch/actions/workflows/ci.yml/badge.svg)](https://github.com/hirorogo/Movie-serch/actions/workflows/ci.yml)
+[![CI](https://github.com/serkenn/Movie-serch-Automatic/actions/workflows/ci.yml/badge.svg)](https://github.com/serkenn/Movie-serch-Automatic/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Private-gray.svg)](#ライセンス)
 
